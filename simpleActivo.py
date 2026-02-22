@@ -725,9 +725,8 @@ def resumen_sesion_stop(username: str, saldo_inicial: float, saldo_actual: float
                 COUNT(*) FILTER (WHERE result = 'equal')    AS iguales,
                 COUNT(*) FILTER (WHERE result = 'error')    AS errores
             FROM operaciones_activas
-            WHERE created_at >= %s
-              AND username = %s;
-        """, (session_start, username))
+            WHERE username = %s;
+        """, (username,))
 
         total_cerradas, ganadas, perdidas, iguales, errores = cur.fetchone()
         cur.close()
@@ -852,6 +851,7 @@ def main():
     put_ctx_active = False
     hubo_operacion = False
     borrar_operaciones_usuario(USUARIO)
+    print(f"Monitoreando Activo: {selected_asset}")
 
     while True:
         candles = Iq.get_candles(selected_asset, 60, 150, time.time())
@@ -893,13 +893,11 @@ def main():
             hubo_operacion = False
 
         if candles:
-            current_candle = candles[-2]
-            previous_candle = candles[-1]
+            current_candle = candles[-1]
             candle_time = current_candle["from"]
             if candle_time != last_candle_time:
-                print(datetime.fromtimestamp(candle_time).strftime("%Y-%m-%d %H:%M:%S"))
+                print(f"Ultima Vela Cerrada: {datetime.fromtimestamp(candle_time).strftime("%Y-%m-%d %H:%M:%S")}")
                 #clear_console()
-                #print(f"Monitoreando actico: {selected_asset}")
                 #Comprobamos Contexto para entradas CALL
                 call_ctx = check_call_context_debug(candles)
                 if call_ctx:
@@ -983,7 +981,10 @@ def main():
             f"💰Profit: {resumen['profit_sesion']}\n"
             )
     ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
+    #Para VPS
     os.system("pkill -f simpleActivo.py")
+    #Para Windows
+    os.system("taskkill /F /IM simpleActivo.exe")
 
 
 if __name__ == "__main__":
