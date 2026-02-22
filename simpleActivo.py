@@ -983,7 +983,6 @@ def main():
             
                 #Comprobamos Contexto para entradas PUT
                 put_ctx = check_put_context_debug(candles)
-                put_ctx = True
                 if put_ctx:
                     if not put_ctx_active and modo_operacion == "Escaner":
                         msg = (f"✅ Contexto Bajista activado en: {selected_asset}")
