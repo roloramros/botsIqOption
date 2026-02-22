@@ -813,6 +813,71 @@ def calcular_profit_acumulado(username: str) -> float:
             conn.close()
 
 
+def procesar_resultado_operacion_async(
+    iq,
+    buy_id,
+    last_cicle_candles,
+    id_conjunto,
+    selected_asset,
+    direccion,
+    patron,
+    fecha_op,
+    usuario,
+    telegram_token,
+    telegram_chat_id,
+    operacion_en_curso,
+):
+    try:
+        estado, ganancia, contexto_json, id_conjunto, fecha_op, par, direccion, patron = esperar_y_ver_resultado(
+            iq,
+            buy_id,
+            1,
+            last_cicle_candles,
+            id_conjunto,
+            selected_asset,
+            direccion,
+            patron,
+            fecha_op,
+        )
+        if estado in ("loose", "loss", "lose"):
+            estado = "loss"
+
+        cerrar_operacion_activa(buy_id, estado, ganancia)
+        guardar_operacion(id_conjunto, fecha_op, par, direccion, patron, estado, contexto_json)
+        profit = calcular_profit_acumulado(usuario)
+
+        if estado == "win" and ganancia > 0:
+            msg = (
+                f"Par: {selected_asset}\n"
+                f"Velas Previas: {patron}\n"
+                f"Resultado: ✅ WIN\n"
+                f"Profit: +${ganancia:.2f}\n"
+                f"Profit de la sesion: ${profit:+.2f}\n"
+            )
+        elif estado in ("loose", "loss", "lose") or ganancia < 0:
+            msg = (
+                f"Par: {selected_asset}\n"
+                f"Velas Previas: {patron}\n"
+                f"Resultado: ❌ LOSS\n"
+                f"Profit: -${abs(ganancia):.2f}\n"
+                f"Profit de la sesion: ${profit:+.2f}\n"
+            )
+        else:
+            msg = (
+                f"Par: {selected_asset}\n"
+                f"Velas Previas: {patron}\n"
+                f"Resultado: ⚪ EQUAL\n"
+                f"Profit: ${ganancia:.2f}\n"
+                f"Profit de la sesion: ${profit:+.2f}\n"
+            )
+
+        _send_telegram_text(telegram_token, telegram_chat_id, msg)
+    except Exception as e:
+        print(f"Error procesando resultado async ({buy_id}): {e}")
+    finally:
+        operacion_en_curso.clear()
+
+
 def main():
     load_dotenv()
 
@@ -825,7 +890,6 @@ def main():
     STOP_WIN = float(os.getenv("IQ_STOPWIN", 0))
     MONTO_OPERACIONES = float(os.getenv("MONTO_OPERACIONES", 0))
     USUARIO = os.getenv("USUARIO", "").strip()
-
 
     wait_betwween_oper = 2
 
@@ -850,7 +914,7 @@ def main():
 
     call_ctx_active = False
     put_ctx_active = False
-    hubo_operacion = False
+    operacion_en_curso = threading.Event()
     start_db_writer()
     enqueue_db_write("borrar_operaciones_usuario", {"username": USUARIO})
     print(f"Monitoreando Activo: {selected_asset}")
@@ -874,45 +938,12 @@ def main():
 
         candles = candles_cache
         last_cicle_candles = candles[:-1]
-        if hubo_operacion:
-            estado, ganancia, contexto_json, id_conjunto, fecha_op, par, direccion, patron = esperar_y_ver_resultado(Iq, buy_id, 1, last_cicle_candles, id_conjunto, selected_asset, direccion, patron, fecha_op)
-            if estado in ("loose", "loss", "lose"):
-                estado = "loss"
-            cerrar_operacion_activa(buy_id, estado, ganancia)
-            guardar_operacion(id_conjunto, fecha_op, par, direccion, patron, estado, contexto_json)
-            profit = calcular_profit_acumulado(USUARIO)
-            if estado == "win" and ganancia > 0:
-                msg = (
-                f"Par: {selected_asset}\n" 
-                f"Velas Previas: {patron}\n"   
-                f"Resultado: ✅ WIN\n"
-                f"Profit: +${ganancia:.2f}\n"
-                f"Profit de la sesion: ${profit:+.2f}\n"
-                )
-            elif estado in ("loose", "loss", "lose") or ganancia < 0:
-                msg = (
-                f"Par: {selected_asset}\n" 
-                f"Velas Previas: {patron}\n"      
-                f"Resultado: ❌ LOSS\n"
-                f"Profit: -${abs(ganancia):.2f}\n"
-                f"Profit de la sesion: ${profit:+.2f}\n"
-                )
-            else:
-                msg = (
-                f"Par: {selected_asset}\n" 
-                f"Velas Previas: {patron}\n"      
-                f"Resultado: ⚪ EQUAL\n"
-                f"Profit: ${ganancia:.2f}\n"
-                f"Profit de la sesion: ${profit:+.2f}\n"
-                )
-            ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
-            hubo_operacion = False
 
         if candles:
             current_candle = candles[-1]
             candle_time = current_candle["from"]
             if candle_time != last_candle_time:
-                print(f"Ultima Vela Cerrada: {datetime.fromtimestamp(candle_time).strftime("%Y-%m-%d %H:%M:%S")}")
+                print(f"Ultima Vela Cerrada: {datetime.fromtimestamp(candle_time).strftime('%Y-%m-%d %H:%M:%S')}")
                 #clear_console()
                 #Comprobamos Contexto para entradas CALL
                 call_ctx = check_call_context_debug(candles)
@@ -922,7 +953,7 @@ def main():
                         msg = (f"✅ Contexto Alcista activado en: {selected_asset}")
                         ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
                     if modo_operacion == "Automatico":
-                        if wait_betwween_oper == 0:
+                        if wait_betwween_oper == 0 and not operacion_en_curso.is_set():
                             entrada_valida, patron = check_call_entry_debug(candles)
                             if entrada_valida:
                                 wait_betwween_oper = 3
@@ -931,10 +962,28 @@ def main():
                                     msg = (f"Error al poner la operacion en: {selected_asset}")
                                     ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
                                 else:
-                                    hubo_operacion = True
-                                    registrar_operacion_activa(buy_id, selected_asset, "call", 1, USUARIO)
                                     id_conjunto = str(uuid.uuid4())
                                     fecha_op = datetime.now()
+                                    operacion_en_curso.set()
+                                    registrar_operacion_activa(buy_id, selected_asset, "call", 1, USUARIO)
+                                    threading.Thread(
+                                        target=procesar_resultado_operacion_async,
+                                        args=(
+                                            Iq,
+                                            buy_id,
+                                            list(last_cicle_candles),
+                                            id_conjunto,
+                                            selected_asset,
+                                            "call",
+                                            patron,
+                                            fecha_op,
+                                            USUARIO,
+                                            TELEGRAM_TOKEN,
+                                            TELEGRAM_CHAT_ID,
+                                            operacion_en_curso,
+                                        ),
+                                        daemon=True,
+                                    ).start()
                                     msg = (f"Operacion 📈 activa en: {selected_asset}\n")
                                     ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
                 elif not call_ctx and call_ctx_active:
@@ -942,14 +991,16 @@ def main():
             
                 #Comprobamos Contexto para entradas PUT
                 put_ctx = check_put_context_debug(candles)
+                put_ctx = True
                 if put_ctx:
                     if not put_ctx_active and modo_operacion == "Escaner":
                         put_ctx_active = True
                         msg = (f"✅ Contexto Bajista activado en: {selected_asset}")
                         ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
                     if modo_operacion == "Automatico":    
-                        if wait_betwween_oper == 0:
+                        if wait_betwween_oper == 0 and not operacion_en_curso.is_set():
                             entrada_valida, patron = check_put_entry_debug(candles)
+                            entrada_valida = True
                             if entrada_valida:
                                 wait_betwween_oper = 3
                                 ok, buy_id = Iq.buy(MONTO_OPERACIONES, selected_asset, "put", 1)
@@ -957,10 +1008,28 @@ def main():
                                     msg = (f"Error al poner la operacion en: {selected_asset}")
                                     ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
                                 else:
-                                    hubo_operacion = True
-                                    registrar_operacion_activa(buy_id, selected_asset, "put", 1, USUARIO)
                                     id_conjunto = str(uuid.uuid4())
                                     fecha_op = datetime.now()
+                                    operacion_en_curso.set()
+                                    registrar_operacion_activa(buy_id, selected_asset, "put", 1, USUARIO)
+                                    threading.Thread(
+                                        target=procesar_resultado_operacion_async,
+                                        args=(
+                                            Iq,
+                                            buy_id,
+                                            list(last_cicle_candles),
+                                            id_conjunto,
+                                            selected_asset,
+                                            "put",
+                                            patron,
+                                            fecha_op,
+                                            USUARIO,
+                                            TELEGRAM_TOKEN,
+                                            TELEGRAM_CHAT_ID,
+                                            operacion_en_curso,
+                                        ),
+                                        daemon=True,
+                                    ).start()
                                     msg = (f"Operacion 📉 activa en: {selected_asset}\n")
                                     ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
                 
@@ -977,7 +1046,7 @@ def main():
                     elif motivo == "STOP_LOSS":
                         break
 
-                    
+
                 sleep_time = calculate_seconds_to_next_minute() - 2        
                 if sleep_time < 0:
                     sleep_time = 0
