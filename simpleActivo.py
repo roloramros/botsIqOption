@@ -10,11 +10,173 @@ from iqoptionapi.stable_api import IQ_Option
 import uuid
 
 import platform
+import queue
+import threading
+import atexit
+
 
 last_candle_time = 0
-
 DEBUG_ACTIVE = True
 
+DB_CONFIG = {
+    "host": "69.169.102.33",
+    "port": 5432,
+    "database": "context_bot_db",
+    "user": "rolo",
+    "password": "EnzoDaniel*2023"
+}
+
+_db_write_queue = queue.Queue()
+_db_writer_stop = threading.Event()
+_db_writer_thread = None
+
+
+def _connect_db():
+    return psycopg2.connect(**DB_CONFIG)
+
+
+def _execute_write(cursor, operation, payload):
+    if operation == "guardar_operacion":
+        cursor.execute(
+            """
+            INSERT INTO operaciones
+            (id_conjunto_velas, fecha_operacion, par, direccion, patron, resultado, contexto)
+            VALUES (%s, %s, %s, %s, %s, %s, %s);
+            """,
+            (
+                payload["id_conjunto"],
+                payload["fecha_op"],
+                payload["par"],
+                payload["direccion"],
+                payload["patron"],
+                payload["resultado"],
+                Json(payload["contexto_json"])
+            )
+        )
+        return
+
+    if operation == "registrar_operacion_activa":
+        cursor.execute(
+            """
+            INSERT INTO operaciones_activas (buy_id, asset, direction, is_active, expires_at, username)
+            VALUES (%s, %s, %s, TRUE, %s, %s)
+            ON CONFLICT (buy_id) DO NOTHING;
+            """,
+            (
+                int(payload["buy_id"]),
+                payload["asset"],
+                payload["direction"],
+                payload["expires_at"],
+                payload["username"]
+            )
+        )
+        return
+
+    if operation == "cerrar_operacion_activa":
+        cursor.execute(
+            """
+            UPDATE operaciones_activas
+            SET
+                is_active = FALSE,
+                result = %s,
+                profit = %s,
+                closed_at = NOW()
+            WHERE buy_id = %s
+              AND is_active = TRUE;
+            """,
+            (
+                payload["resultado"],
+                float(payload["ganancia"]),
+                int(payload["buy_id"])
+            )
+        )
+        return
+
+    if operation == "borrar_operaciones_usuario":
+        cursor.execute(
+            """
+            DELETE FROM operaciones_activas
+            WHERE username = %s;
+            """,
+            (payload["username"],)
+        )
+        return
+
+    raise ValueError(f"Operacion de escritura desconocida: {operation}")
+
+
+def _db_writer_loop():
+    conn = None
+    cursor = None
+    while True:
+        if _db_writer_stop.is_set() and _db_write_queue.empty():
+            break
+
+        try:
+            operation, payload = _db_write_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        if operation is None:
+            continue
+
+        try:
+            if conn is None or cursor is None or conn.closed:
+                conn = _connect_db()
+                cursor = conn.cursor()
+            _execute_write(cursor, operation, payload)
+            conn.commit()
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            print(f"Error en escritura async '{operation}': {e}")
+            try:
+                if cursor:
+                    cursor.close()
+            except Exception:
+                pass
+            try:
+                if conn:
+                    conn.close()
+            except Exception:
+                pass
+            conn = None
+            cursor = None
+        finally:
+            _db_write_queue.task_done()
+
+    try:
+        if cursor:
+            cursor.close()
+    except Exception:
+        pass
+    try:
+        if conn:
+            conn.close()
+    except Exception:
+        pass
+
+
+def start_db_writer():
+    global _db_writer_thread
+    if _db_writer_thread and _db_writer_thread.is_alive():
+        return
+    _db_writer_stop.clear()
+    _db_writer_thread = threading.Thread(target=_db_writer_loop, name="db-writer", daemon=True)
+    _db_writer_thread.start()
+
+
+def stop_db_writer(timeout: float = 5.0):
+    _db_writer_stop.set()
+    if _db_writer_thread and _db_writer_thread.is_alive():
+        _db_writer_thread.join(timeout=timeout)
+
+
+def enqueue_db_write(operation, payload):
+    _db_write_queue.put((operation, payload))
+
+
+atexit.register(stop_db_writer)
 
 
 def get_float_env(name: str, default: float = 0.0) -> float:
@@ -493,192 +655,41 @@ def esperar_y_ver_resultado(iq, order_id, duracion_min: int, candles, id_conjunt
 
 
 def guardar_operacion(id_conjunto, fecha_op, par, direccion, patron, resultado, contexto_json):
-    """
-    Guarda una operacion completa en PostgreSQL
-    """
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            host="69.169.102.33",
-            database="context_bot_db",
-            user="rolo",
-            password="EnzoDaniel*2023"
-        )
-        cur = conn.cursor()
-        
-        insert_sql = """
-            INSERT INTO operaciones
-            (id_conjunto_velas, fecha_operacion, par, direccion, patron, resultado, contexto)
-            VALUES (%s, %s, %s, %s, %s, %s, %s);
-        """
-        
-        cur.execute(insert_sql, (
-            id_conjunto,
-            fecha_op,
-            par,
-            direccion,
-            patron,
-            resultado,
-            Json(contexto_json)  # psycopg2 lo convierte a JSONB
-        ))
-        
-        conn.commit()
-        cur.close()
-        #print(f"✅ Operacion guardada en BD: {patron} - {resultado}")
-        
-    except psycopg2.Error as e:
-        print(f"❌ Error de base de datos: {e}")
-        if conn:
-            conn.rollback()
-    except Exception as e:
-        print(f"❌ Error general: {e}")
-    finally:
-        if conn:
-            conn.close()
+    
+    enqueue_db_write("guardar_operacion", {
+        "id_conjunto": id_conjunto,
+        "fecha_op": fecha_op,
+        "par": par,
+        "direccion": direccion,
+        "patron": patron,
+        "resultado": resultado,
+        "contexto_json": contexto_json
+    })
 
 
 def registrar_operacion_activa(buy_id, asset, direction, duracion_min, username):
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            host="69.169.102.33",
-            database="context_bot_db",
-            user="rolo",
-            password="EnzoDaniel*2023"
-        )
-        cur = conn.cursor()
-
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=duracion_min, seconds=5)
-
-        cur.execute("""
-            INSERT INTO operaciones_activas (buy_id, asset, direction, is_active, expires_at, username)
-            VALUES (%s, %s, %s, TRUE, %s, %s)
-            ON CONFLICT (buy_id) DO NOTHING;
-        """, (int(buy_id), asset, direction, expires_at, username))
-
-        conn.commit()
-        cur.close()
-
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        print(f"Error registrando operacion activa: {e}")  # sin tilde
-
-    finally:
-        if conn:
-            conn.close()
-
-
-def cerrar_operacion_activa_old(buy_id, resultado):
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            host="69.169.102.33",
-            database="context_bot_db",
-            user="rolo",
-            password="EnzoDaniel*2023"
-        )
-
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE operaciones_activas
-            SET 
-                is_active = FALSE,
-                result = %s,
-                closed_at = NOW()
-            WHERE buy_id = %s
-              AND is_active = TRUE;
-        """, (resultado, int(buy_id)))
-
-        conn.commit()
-        cur.close()
-
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        print(f"Error cerrando operacion: {e}")
-
-    finally:
-        if conn:
-            conn.close()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=duracion_min, seconds=5)
+    enqueue_db_write("registrar_operacion_activa", {
+        "buy_id": buy_id,
+        "asset": asset,
+        "direction": direction,
+        "expires_at": expires_at,
+        "username": username
+    })
 
 
 def cerrar_operacion_activa(buy_id, resultado, ganancia=0.0):
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            host="69.169.102.33",
-            database="context_bot_db",
-            user="rolo",
-            password="EnzoDaniel*2023"
-        )
-        cur = conn.cursor()
-
-        cur.execute("""
-            UPDATE operaciones_activas
-            SET 
-                is_active = FALSE,
-                result = %s,
-                profit = %s,
-                closed_at = NOW()
-            WHERE buy_id = %s
-              AND is_active = TRUE;
-        """, (resultado, float(ganancia), int(buy_id)))
-
-        conn.commit()
-        cur.close()
-
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        print(f"Error cerrando operacion: {e}")
-
-    finally:
-        if conn:
-            conn.close()
-
-
-def borrar_operaciones_usuario(username: str):
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            host="69.169.102.33",
-            port=5432,
-            database="context_bot_db",
-            user="rolo",
-            password="EnzoDaniel*2023"
-        )
-        cur = conn.cursor()
-
-        cur.execute("""
-            DELETE FROM operaciones_activas
-            WHERE username = %s;
-        """, (username,))
-
-        conn.commit()
-        cur.close()
-        #print(f"Operaciones del usuario {username} eliminadas correctamente.")
-
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        print(f"Error borrando registros: {e}")
-
-    finally:
-        if conn:
-            conn.close()
+    enqueue_db_write("cerrar_operacion_activa", {
+        "buy_id": buy_id,
+        "resultado": resultado,
+        "ganancia": ganancia
+    })
 
 
 def hay_operacion_activa(username: str) -> bool:
     conn = None
     try:
-        conn = psycopg2.connect(
-            host="69.169.102.33",
-            database="context_bot_db",
-            user="rolo",
-            password="EnzoDaniel*2023"
-        )
+        conn = _connect_db()
         cur = conn.cursor()
 
         cur.execute("""
@@ -709,12 +720,7 @@ def resumen_sesion_stop(username: str, saldo_inicial: float, saldo_actual: float
     """
     conn = None
     try:
-        conn = psycopg2.connect(
-            host="69.169.102.33",
-            database="context_bot_db",
-            user="rolo",
-            password="EnzoDaniel*2023"
-        )
+        conn = _connect_db()
         cur = conn.cursor()
 
         cur.execute("""
@@ -784,12 +790,7 @@ def revisar_stops_si_libre(Iq, saldo_inicial, STOP_WIN, STOP_LOSS, USUARIO):
 def calcular_profit_acumulado(username: str) -> float:
     conn = None
     try:
-        conn = psycopg2.connect(
-            host="69.169.102.33",
-            database="context_bot_db",
-            user="rolo",
-            password="EnzoDaniel*2023"
-        )
+        conn = _connect_db()
         cur = conn.cursor()
         
         cur.execute("""
@@ -850,13 +851,28 @@ def main():
     call_ctx_active = False
     put_ctx_active = False
     hubo_operacion = False
-    borrar_operaciones_usuario(USUARIO)
+    start_db_writer()
+    enqueue_db_write("borrar_operaciones_usuario", {"username": USUARIO})
     print(f"Monitoreando Activo: {selected_asset}")
+    candles_cache = Iq.get_candles(selected_asset, 60, 151, time.time())
+    candles_cache = sorted(candles_cache, key=lambda x: x["from"])
+    candles_cache = candles_cache[:-1]
 
     while True:
-        candles = Iq.get_candles(selected_asset, 60, 150, time.time())
-        candles = sorted(candles, key=lambda x: x["from"])
-        candles = candles[:-1]
+        recent_candles = Iq.get_candles(selected_asset, 60, 2, time.time())
+        recent_candles = sorted(recent_candles, key=lambda x: x["from"])
+        recent_candles = recent_candles[:-1]
+
+        if recent_candles:
+            last_closed_candle = recent_candles[-1]
+            if not candles_cache or last_closed_candle["from"] > candles_cache[-1]["from"]:
+                candles_cache.append(last_closed_candle)
+                if len(candles_cache) > 150:
+                    candles_cache = candles_cache[-150:]
+            elif last_closed_candle["from"] == candles_cache[-1]["from"]:
+                candles_cache[-1] = last_closed_candle
+
+        candles = candles_cache
         last_cicle_candles = candles[:-1]
         if hubo_operacion:
             estado, ganancia, contexto_json, id_conjunto, fecha_op, par, direccion, patron = esperar_y_ver_resultado(Iq, buy_id, 1, last_cicle_candles, id_conjunto, selected_asset, direccion, patron, fecha_op)
@@ -908,7 +924,6 @@ def main():
                     if modo_operacion == "Automatico":
                         if wait_betwween_oper == 0:
                             entrada_valida, patron = check_call_entry_debug(candles)
-                            direccion="call"
                             if entrada_valida:
                                 wait_betwween_oper = 3
                                 ok, buy_id = Iq.buy(MONTO_OPERACIONES, selected_asset, "call", 1)
@@ -922,7 +937,6 @@ def main():
                                     fecha_op = datetime.now()
                                     msg = (f"Operacion 📈 activa en: {selected_asset}\n")
                                     ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
-                                                  
                 elif not call_ctx and call_ctx_active:
                     call_ctx_active = False
             
@@ -936,7 +950,6 @@ def main():
                     if modo_operacion == "Automatico":    
                         if wait_betwween_oper == 0:
                             entrada_valida, patron = check_put_entry_debug(candles)
-                            direccion = "put"
                             if entrada_valida:
                                 wait_betwween_oper = 3
                                 ok, buy_id = Iq.buy(MONTO_OPERACIONES, selected_asset, "put", 1)
@@ -974,13 +987,14 @@ def main():
     #Si llegamos aqui es que alcanzamos un STOP, vamos a imprimir el resumen
     resumen = resumen_sesion_stop(USUARIO,saldo_inicial,Iq.get_balance(),datetime.now())
     msg =   (
-            f"Resumen de la Sesión:\n" 
+            f"Sesión Finalizada:\n" 
             f"📈Total de Operaciones: {resumen['total']}\n"   
             f"✅Ganadas: {resumen['ganadas']}\n"   
             f"❌Perdidas: {resumen['perdidas']}\n"
             f"💰Profit: {resumen['profit_sesion']}\n"
             )
     ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
+    stop_db_writer()
     #Para VPS
     os.system("pkill -f simpleActivo.py")
     #Para Windows
