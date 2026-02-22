@@ -205,13 +205,6 @@ def _send_telegram_text(token: str, chat_id: str, text: str) -> bool:
         return False
 
 
-def clear_console():
-    if platform.system() == "Windows":
-        os.system("cls")
-    else:
-        os.system("clear")
-
-
 def calculate_seconds_to_next_minute():
     now = datetime.now()
     seconds_current_minute = now.second
@@ -944,7 +937,6 @@ def main():
             candle_time = current_candle["from"]
             if candle_time != last_candle_time:
                 print(f"Ultima Vela Cerrada: {datetime.fromtimestamp(candle_time).strftime('%Y-%m-%d %H:%M:%S')}")
-                #clear_console()
                 #Comprobamos Contexto para entradas CALL
                 call_ctx = check_call_context_debug(candles)
                 if call_ctx:
@@ -994,13 +986,11 @@ def main():
                 put_ctx = True
                 if put_ctx:
                     if not put_ctx_active and modo_operacion == "Escaner":
-                        put_ctx_active = True
                         msg = (f"✅ Contexto Bajista activado en: {selected_asset}")
                         ok = _send_telegram_text(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, msg)
                     if modo_operacion == "Automatico":    
                         if wait_betwween_oper == 0 and not operacion_en_curso.is_set():
                             entrada_valida, patron = check_put_entry_debug(candles)
-                            entrada_valida = True
                             if entrada_valida:
                                 wait_betwween_oper = 3
                                 ok, buy_id = Iq.buy(MONTO_OPERACIONES, selected_asset, "put", 1)
