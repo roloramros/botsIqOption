@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from iqoptionapi.stable_api import IQ_Option
 import psycopg2
-from psycopg2.extras import Json
+from psycopg2.extras import Json, execute_values
 
 # ============================================
 # CONFIGURACIÓN Y FUNCIONES AUXILIARES
@@ -261,7 +261,7 @@ def check_put_entry_debug(candles):
 # FUNCIONES DE BACKTESTING
 # ============================================
 
-def pedir_datos_backtesting():
+def pedir_datos_backtesting_old():
     """
     Pide al usuario los parámetros para el backtesting
     """
@@ -307,8 +307,45 @@ def pedir_datos_backtesting():
     
     return par, fecha_inicio, fecha_fin, guardar_en_bd
 
+# Reemplazo de la entrada por consola:
+# solo se solicita la fecha (YYYY-MM-DD) y se fija el horario 05:00-18:00.
+def pedir_datos_backtesting():
+    """
+    Pide al usuario la fecha para el backtesting (YYYY-MM-DD).
+    El analisis se ejecuta entre 05:00 y 18:00.
+    """
+    print("\n" + "=" * 50)
+    print("CONFIGURACION DE BACKTESTING")
+    print("=" * 50)
+
+    # Pares desde .env (lista separada por comas)
+    assets_raw = os.getenv("IQ_ASSETS", "").strip()
+    assets = [a.strip().upper() for a in assets_raw.split(",") if a.strip()]
+    if not assets:
+        raise ValueError("Falta IQ_ASSETS en .env (ej: EURUSD-OTC,EURGBP-OTC)")
+
+    # Pedir fecha
+    while True:
+        fecha_str = input("Fecha de backtest (formato: YYYY-MM-DD) [ej: 2024-01-01]: ").strip()
+        try:
+            fecha_base = datetime.strptime(fecha_str, "%Y-%m-%d")
+            break
+        except ValueError:
+            print("Formato incorrecto. Usa: YYYY-MM-DD")
+
+    fecha_inicio = fecha_base.replace(hour=5, minute=0, second=0, microsecond=0)
+    fecha_fin = fecha_base.replace(hour=18, minute=0, second=0, microsecond=0)
+
+    # Guardar en BD por .env (default: s)
+    guardar_env = os.getenv("BACKTEST_GUARDAR_BD", "s").strip().lower()
+    guardar_en_bd = guardar_env in ["s", "si", "y", "yes", "true", "1"]
+
+    return assets, fecha_inicio, fecha_fin, guardar_en_bd
+
+
 from datetime import datetime
 import time
+
 
 def obtener_velas_historicas(iq, par, timeframe, desde_timestamp, hasta_timestamp, count=1000):
     """
@@ -323,14 +360,8 @@ def obtener_velas_historicas(iq, par, timeframe, desde_timestamp, hasta_timestam
     max_iteraciones = 1000          # ponlo alto si descargas mucho historial
     iteracion = 0
 
-    print(f"📥 Descargando velas de {par} TF={timeframe}")
-    print(f"   Desde: {datetime.fromtimestamp(desde_timestamp)}")
-    print(f"   Hasta: {datetime.fromtimestamp(hasta_timestamp)}")
-    print(f"   Cada petición: {count} velas (~{(count*timeframe)/3600:.2f} horas si timeframe está en segundos)")
-
     while current_from >= desde_timestamp and iteracion < max_iteraciones:
         iteracion += 1
-        print(f"\n📡 Petición #{iteracion} - Ancla: {datetime.fromtimestamp(current_from)}")
 
         try:
             velas = iq.get_candles(par, timeframe, count, current_from)
@@ -339,7 +370,6 @@ def obtener_velas_historicas(iq, par, timeframe, desde_timestamp, hasta_timestam
             break
 
         if not velas:
-            print("⚠️ No se recibieron más velas")
             break
 
         # Orden consistente
@@ -347,10 +377,6 @@ def obtener_velas_historicas(iq, par, timeframe, desde_timestamp, hasta_timestam
 
         primera = velas[0]["from"]
         ultima  = velas[-1]["from"]
-
-        print(f"   📊 Lote: {len(velas)} velas")
-        print(f"   📅 Rango lote: {datetime.fromtimestamp(primera)} → {datetime.fromtimestamp(ultima)}")
-
         todas.extend(velas)
 
         # siguiente lote: más atrás todavía
@@ -358,13 +384,9 @@ def obtener_velas_historicas(iq, par, timeframe, desde_timestamp, hasta_timestam
 
         # Corte correcto: cuando ya tocamos (o pasamos) el inicio del rango
         if primera <= desde_timestamp:
-            print("   ✅ Alcanzado el inicio del rango")
             break
 
         time.sleep(0.3)
-
-    if iteracion >= max_iteraciones:
-        print("⚠️ Máximo de iteraciones alcanzado; puede faltar historial o timeframe muy pequeño.")
 
     # Deduplicar por timestamp
     unicas = {}
@@ -373,12 +395,8 @@ def obtener_velas_historicas(iq, par, timeframe, desde_timestamp, hasta_timestam
 
     # Ordenar y filtrar rango exacto
     resultado = [unicas[k] for k in sorted(unicas.keys()) if desde_timestamp <= k <= hasta_timestamp]
-
-    print(f"\n✅ TOTAL FINAL: {len(resultado)} velas en el rango solicitado")
-    print(f"   Desde: {datetime.fromtimestamp(desde_timestamp)}")
-    print(f"   Hasta: {datetime.fromtimestamp(hasta_timestamp)}")
-
     return resultado
+
 
 def simular_entrada_backtesting(candles, indice_actual, direccion, patron):
     """
@@ -406,6 +424,7 @@ def simular_entrada_backtesting(candles, indice_actual, direccion, patron):
             return "loss", -1.0
         else:
             return "equal", 0.0
+
 
 def preparar_contexto_json(candles, num_velas=10):
     """
@@ -442,13 +461,14 @@ def preparar_contexto_json(candles, num_velas=10):
         }
     }
 
+
 def guardar_operacion_backtesting(id_conjunto, fecha_op, par, direccion, patron, resultado, contexto_json):
     """
     Guarda una operación de backtesting en PostgreSQL
     """
     try:
         conn = psycopg2.connect(
-            host="localhost",
+            host="69.169.102.33",
             database="context_bot_db",
             user="rolo",
             password="EnzoDaniel*2023"
@@ -480,6 +500,7 @@ def guardar_operacion_backtesting(id_conjunto, fecha_op, par, direccion, patron,
         print(f"❌ Error guardando en BD: {e}")
         return False
 
+
 def ejecutar_backtesting(iq, par, fecha_inicio, fecha_fin, guardar_en_bd=True):
     """
     Ejecuta backtesting para un par en un rango de fechas
@@ -489,11 +510,7 @@ def ejecutar_backtesting(iq, par, fecha_inicio, fecha_fin, guardar_en_bd=True):
     
     print("\n" + "=" * 60)
     print(f"📊 BACKTESTING PARA {par}")
-    print("=" * 60)
-    print(f"📅 Desde: {fecha_inicio.strftime('%Y-%m-%d %H:%M')}")
-    print(f"📅 Hasta: {fecha_fin.strftime('%Y-%m-%d %H:%M')}")
-    print("=" * 60 + "\n")
-    
+
     # Obtener velas históricas
     velas = obtener_velas_historicas(iq, par, 60, ts_inicio, ts_fin)
     
@@ -516,6 +533,7 @@ def ejecutar_backtesting(iq, par, fecha_inicio, fecha_fin, guardar_en_bd=True):
     }
 
     wait_betwween_oper = 0
+    operaciones_guardar = []
     
     # Simular vela por vela
     for i in range(30, len(velas) - 1):  # -1 para dejar vela de resultado
@@ -551,19 +569,15 @@ def ejecutar_backtesting(iq, par, fecha_inicio, fecha_fin, guardar_en_bd=True):
                         stats["equal"] += 1
                         resultado_texto = "⚪ EQUAL"
                     
-                    # Mostrar en consola
-                    fecha_vela = datetime.fromtimestamp(velas[i]["from"]).strftime("%Y-%m-%d %H:%M")
-                    print(f"{fecha_vela} | {patron} | {resultado_texto}")
-                    
-                    # Guardar en BD si se solicita
+                    # Acumular para guardar en BD al final
                     if guardar_en_bd:
                         id_conjunto = str(uuid.uuid4())
                         fecha_op = datetime.fromtimestamp(velas[i]["from"])
                         contexto_json = preparar_contexto_json(ventana, 10)
-                        guardar_operacion_backtesting(
-                            id_conjunto, fecha_op, par, "call", patron, 
+                        operaciones_guardar.append((
+                            id_conjunto, fecha_op, par, "call", patron,
                             estado, contexto_json
-                        )
+                        ))
         
         # Verificar entradas PUT
         if put_ctx:
@@ -589,28 +603,24 @@ def ejecutar_backtesting(iq, par, fecha_inicio, fecha_fin, guardar_en_bd=True):
                         stats["equal"] += 1
                         resultado_texto = "⚪ EQUAL"
                     
-                    # Mostrar en consola
-                    fecha_vela = datetime.fromtimestamp(velas[i]["from"]).strftime("%Y-%m-%d %H:%M")
-                    print(f"{fecha_vela} | {patron} | {resultado_texto}")
-                    
-                    # Guardar en BD si se solicita
+                    # Acumular para guardar en BD al final
                     if guardar_en_bd:
                         id_conjunto = str(uuid.uuid4())
                         fecha_op = datetime.fromtimestamp(velas[i]["from"])
                         contexto_json = preparar_contexto_json(ventana, 10)
-                        guardar_operacion_backtesting(
-                            id_conjunto, fecha_op, par, "put", patron, 
+                        operaciones_guardar.append((
+                            id_conjunto, fecha_op, par, "put", patron,
                             estado, contexto_json
-                        )
+                        ))
 
         if wait_betwween_oper > 0:
             wait_betwween_oper = wait_betwween_oper - 1
 
+    # Guardar en BD una sola vez al final
+    if guardar_en_bd:
+        guardar_operaciones_backtesting(operaciones_guardar)
+
     # Mostrar resultados finales
-    print("\n" + "=" * 60)
-    print("📈 RESULTADOS FINALES")
-    print("=" * 60)
-    
     if stats["total_ops"] > 0:
         win_rate = (stats["ganadas"] / stats["total_ops"]) * 100
         print(f"Total operaciones: {stats['total_ops']}")
@@ -618,11 +628,9 @@ def ejecutar_backtesting(iq, par, fecha_inicio, fecha_fin, guardar_en_bd=True):
         print(f"❌ Perdidas: {stats['perdidas']} ({(stats['perdidas']/stats['total_ops']*100):.2f}%)")
         print(f"⚪ Equal: {stats['equal']} ({(stats['equal']/stats['total_ops']*100):.2f}%)")
         
-        print("\n📊 POR PATRÓN:")
         for patron, datos in stats["patrones"].items():
             if datos["intentos"] > 0:
                 win_rate_patron = (datos["ganadas"] / datos["intentos"]) * 100
-                print(f"{patron}: {datos['intentos']} ops - {win_rate_patron:.2f}% win rate")
     else:
         print("❌ No se encontraron operaciones en el período")
     
@@ -643,35 +651,69 @@ def main():
         return
     
      # Pedir datos al usuario
-    par, fecha_inicio, fecha_fin, guardar_en_bd = pedir_datos_backtesting()
+    assets, fecha_inicio, fecha_fin, guardar_en_bd = pedir_datos_backtesting()
     
     # Confirmar datos
     print("\n" + "=" * 50)
     print("📋 DATOS CONFIRMADOS:")
-    print(f"Par: {par}")
-    print(f"Desde: {fecha_inicio.strftime('%Y-%m-%d %H:%M')}")
-    print(f"Hasta: {fecha_fin.strftime('%Y-%m-%d %H:%M')}")
+    print(f"Pares: {', '.join(assets)}")
     print(f"Guardar en BD: {'Sí' if guardar_en_bd else 'No'}")
-    print("=" * 50 + "\n")
+    print("=" * 50)
     
-    input("Presiona Enter para continuar...")
+    input("Presiona Enter para comenzar...")
     
-    print("🔄 Conectando a iQOption...")
     Iq = IQ_Option(email, password)
     Iq.connect()
     print("✅ Conectado!")
     
     
-    # Ejecutar backtesting
-    resultados = ejecutar_backtesting(Iq, par, fecha_inicio, fecha_fin, guardar_en_bd)
-    
-    # Opcional: guardar resumen en un archivo
-    if resultados:
-        with open(f"backtesting_{par}_{fecha_inicio.strftime('%Y%m%d')}.txt", "w") as f:
-            f.write(f"Resultados backtesting {par}\n")
-            f.write(f"Período: {fecha_inicio} a {fecha_fin}\n")
-            f.write(f"Total ops: {resultados['total_ops']}\n")
-            f.write(f"Win rate: {(resultados['ganadas']/resultados['total_ops']*100):.2f}%\n")
+    # Ejecutar backtesting por activo
+    for par in assets:
+        resultados = ejecutar_backtesting(Iq, par, fecha_inicio, fecha_fin, guardar_en_bd)
+
+    input("Presiona Enter para terminar...")            
+
+
+
+def guardar_operaciones_backtesting(operaciones):
+    """
+    Guarda varias operaciones de backtesting en PostgreSQL en una sola peticion.
+    operaciones: lista de tuplas (id_conjunto, fecha_op, par, direccion, patron, resultado, contexto_json)
+    """
+    if not operaciones:
+        return True
+
+    try:
+        conn = psycopg2.connect(
+            host="69.169.102.33",
+            database="context_bot_db",
+            user="rolo",
+            password="EnzoDaniel*2023"
+        )
+        cur = conn.cursor()
+
+        insert_sql = """
+            INSERT INTO operaciones_backtesting
+            (id_conjunto_velas, fecha_operacion, par, direccion, patron, resultado, contexto)
+            VALUES %s;
+        """
+
+        data = [
+            (id_conjunto, fecha_op, par, direccion, patron, resultado, Json(contexto_json))
+            for (id_conjunto, fecha_op, par, direccion, patron, resultado, contexto_json)
+            in operaciones
+        ]
+
+        execute_values(cur, insert_sql, data)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        print(f"âŒ Error guardando en BD: {e}")
+        return False
 
 if __name__ == "__main__":
     main()
