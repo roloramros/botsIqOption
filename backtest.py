@@ -1,4 +1,4 @@
-import os
+﻿import os
 import time
 import sys
 import uuid
@@ -41,9 +41,182 @@ def ema_series(values, period: int):
         out[i] = prev
     return out
 
+def rsi_series(values, period: int = 14):
+    """RSI (Wilder). Devuelve lista misma longitud que values."""
+    if period <= 0:
+        raise ValueError("period must be > 0")
+    n = len(values)
+    out = [None] * n
+    if n <= period:
+        return out
+
+    gains = []
+    losses = []
+    for i in range(1, period + 1):
+        delta = values[i] - values[i - 1]
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
+
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+
+    if avg_loss == 0:
+        out[period] = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        out[period] = 100.0 - (100.0 / (1.0 + rs))
+
+    for i in range(period + 1, n):
+        delta = values[i] - values[i - 1]
+        gain = max(delta, 0.0)
+        loss = max(-delta, 0.0)
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+
+        if avg_loss == 0:
+            out[i] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            out[i] = 100.0 - (100.0 / (1.0 + rs))
+
+    return out
+
+def adx_series(highs, lows, closes, period: int = 14):
+    """ADX (Wilder). Devuelve (adx, di_plus, di_minus) listas misma longitud."""
+    if period <= 0:
+        raise ValueError("period must be > 0")
+    n = len(closes)
+    adx = [None] * n
+    di_plus = [None] * n
+    di_minus = [None] * n
+    if n <= period:
+        return adx, di_plus, di_minus
+
+    tr_list = [0.0] * n
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+
+    for i in range(1, n):
+        high = highs[i]
+        low = lows[i]
+        prev_close = closes[i - 1]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_list[i] = tr
+
+        up_move = high - highs[i - 1]
+        down_move = lows[i - 1] - low
+        plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0.0
+        minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0.0
+
+    tr14 = sum(tr_list[1:period + 1])
+    plus_dm14 = sum(plus_dm[1:period + 1])
+    minus_dm14 = sum(minus_dm[1:period + 1])
+
+    if tr14 != 0:
+        di_plus[period] = 100.0 * (plus_dm14 / tr14)
+        di_minus[period] = 100.0 * (minus_dm14 / tr14)
+        dx = 100.0 * abs(di_plus[period] - di_minus[period]) / (di_plus[period] + di_minus[period]) if (di_plus[period] + di_minus[period]) != 0 else 0.0
+    else:
+        dx = 0.0
+
+    dx_list = [None] * n
+    dx_list[period] = dx
+
+    for i in range(period + 1, n):
+        tr14 = tr14 - (tr14 / period) + tr_list[i]
+        plus_dm14 = plus_dm14 - (plus_dm14 / period) + plus_dm[i]
+        minus_dm14 = minus_dm14 - (minus_dm14 / period) + minus_dm[i]
+
+        if tr14 != 0:
+            di_plus[i] = 100.0 * (plus_dm14 / tr14)
+            di_minus[i] = 100.0 * (minus_dm14 / tr14)
+            dx = 100.0 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i]) if (di_plus[i] + di_minus[i]) != 0 else 0.0
+        else:
+            di_plus[i] = 0.0
+            di_minus[i] = 0.0
+            dx = 0.0
+
+        dx_list[i] = dx
+
+    adx_start = period * 2
+    if adx_start < n:
+        adx_init = [v for v in dx_list[period:adx_start + 1] if v is not None]
+        if adx_init:
+            adx[adx_start] = sum(adx_init) / len(adx_init)
+
+        for i in range(adx_start + 1, n):
+            adx[i] = ((adx[i - 1] * (period - 1)) + dx_list[i]) / period if adx[i - 1] is not None else dx_list[i]
+
+    return adx, di_plus, di_minus
+
 # ============================================
 # FUNCIONES DE ANÁLISIS (copiadas de tu bot)
 # ============================================
+
+
+
+def resample_candles_to_5m(candles_1m):
+    """Agrupa velas de 1m en velas cerradas de 5m (ancladas por epoch)."""
+    if not candles_1m:
+        return []
+
+    velas_5m = []
+    bucket = None
+    for c in candles_1m:
+        ts = int(c["from"])
+        slot = ts - (ts % 300)
+        o = float(c["open"])
+        h = float(c.get("max", c.get("high", c["close"])))
+        l = float(c.get("min", c.get("low", c["open"])))
+        cl = float(c["close"])
+
+        if bucket is None or bucket["from"] != slot:
+            if bucket is not None:
+                velas_5m.append(bucket)
+            bucket = {"from": slot, "open": o, "max": h, "min": l, "close": cl}
+        else:
+            bucket["max"] = max(bucket["max"], h)
+            bucket["min"] = min(bucket["min"], l)
+            bucket["close"] = cl
+
+    if bucket is not None:
+        velas_5m.append(bucket)
+
+    return velas_5m
+
+
+def build_ema5m_map_for_1m(candles_1m):
+    """
+    Devuelve mapa ts_1m -> (ema7_5m, ema14_5m, ema21_5m, ts_ref_5m).
+    Usa la ?ltima vela 5m CERRADA respecto a cada vela 1m (sin look-ahead).
+    """
+    if not candles_1m:
+        return {}
+
+    velas_5m = resample_candles_to_5m(candles_1m)
+    closes_5m = [float(c["close"]) for c in velas_5m]
+    e7_5m = ema_series(closes_5m, 7)
+    e14_5m = ema_series(closes_5m, 14)
+    e21_5m = ema_series(closes_5m, 21)
+
+    idx_by_slot = {int(v["from"]): i for i, v in enumerate(velas_5m)}
+    ema_map = {}
+    for c1m in candles_1m:
+        ts = int(c1m["from"])
+        slot = ts - (ts % 300)
+        idx_5m = idx_by_slot.get(slot, -1) - 1
+        e7 = e14 = e21 = None
+        ts_ref = None
+
+        if 0 <= idx_5m < len(velas_5m):
+            ts_ref = int(velas_5m[idx_5m]["from"])
+            e7 = e7_5m[idx_5m]
+            e14 = e14_5m[idx_5m]
+            e21 = e21_5m[idx_5m]
+
+        ema_map[ts] = (e7, e14, e21, ts_ref)
+
+    return ema_map
 
 def check_call_context_debug(candles):
     """Versión simplificada sin prints para backtesting"""
@@ -333,14 +506,11 @@ def pedir_datos_backtesting():
         except ValueError:
             print("Formato incorrecto. Usa: YYYY-MM-DD")
 
-    fecha_inicio = fecha_base.replace(hour=5, minute=0, second=0, microsecond=0)
-    fecha_fin = fecha_base.replace(hour=18, minute=0, second=0, microsecond=0)
-
     # Guardar en BD por .env (default: s)
     guardar_env = os.getenv("BACKTEST_GUARDAR_BD", "s").strip().lower()
     guardar_en_bd = guardar_env in ["s", "si", "y", "yes", "true", "1"]
 
-    return assets, fecha_inicio, fecha_fin, guardar_en_bd
+    return assets, fecha_base.date(), guardar_en_bd
 
 
 from datetime import datetime
@@ -431,9 +601,14 @@ def preparar_contexto_json(candles, num_velas=10):
     Prepara el JSON con las últimas N velas y sus EMAs
     """
     closes = [float(c["close"]) for c in candles]
+    highs = [float(c.get("max", c.get("high", c["close"]))) for c in candles]
+    lows = [float(c.get("min", c.get("low", c["open"]))) for c in candles]
     e7 = ema_series(closes, 7)
     e14 = ema_series(closes, 14)
     e21 = ema_series(closes, 21)
+    rsi14 = rsi_series(closes, 14)
+    adx14, di_plus_14, di_minus_14 = adx_series(highs, lows, closes, 14)
+    ema5m_map = build_ema5m_map_for_1m(candles)
     
     ultimas = candles[-num_velas:]
     start_idx = len(candles) - num_velas
@@ -450,7 +625,15 @@ def preparar_contexto_json(candles, num_velas=10):
             "close": float(vela["close"]),
             "ema_rapida": round(e7[idx], 6) if e7[idx] is not None else None,
             "ema_media": round(e14[idx], 6) if e14[idx] is not None else None,
-            "ema_lenta": round(e21[idx], 6) if e21[idx] is not None else None
+            "ema_lenta": round(e21[idx], 6) if e21[idx] is not None else None,
+            "rsi_14": round(rsi14[idx], 6) if rsi14[idx] is not None else None,
+            "adx_14": round(adx14[idx], 6) if adx14[idx] is not None else None,
+            "di_plus_14": round(di_plus_14[idx], 6) if di_plus_14[idx] is not None else None,
+            "di_minus_14": round(di_minus_14[idx], 6) if di_minus_14[idx] is not None else None,
+            "ema_rapida_5m": round(ema5m_map[int(vela["from"])][0], 6) if ema5m_map[int(vela["from"])][0] is not None else None,
+            "ema_media_5m": round(ema5m_map[int(vela["from"])][1], 6) if ema5m_map[int(vela["from"])][1] is not None else None,
+            "ema_lenta_5m": round(ema5m_map[int(vela["from"])][2], 6) if ema5m_map[int(vela["from"])][2] is not None else None,
+            "ema_5m_ref_timestamp": ema5m_map[int(vela["from"])][3]
         })
     
     return {
@@ -651,12 +834,20 @@ def main():
         return
     
      # Pedir datos al usuario
-    assets, fecha_inicio, fecha_fin, guardar_en_bd = pedir_datos_backtesting()
+    assets, fecha_inicio_base, guardar_en_bd = pedir_datos_backtesting()
+
+    fecha_hoy = datetime.now().date()
+    fecha_hasta = fecha_hoy - timedelta(days=1)
+
+    if fecha_inicio_base > fecha_hasta:
+        print("❌ La fecha inicial debe ser anterior a hoy para poder analizar días cerrados.")
+        return
     
     # Confirmar datos
     print("\n" + "=" * 50)
     print("📋 DATOS CONFIRMADOS:")
     print(f"Pares: {', '.join(assets)}")
+    print(f"Rango diario: {fecha_inicio_base} a {fecha_hasta} (05:00-18:00)")
     print(f"Guardar en BD: {'Sí' if guardar_en_bd else 'No'}")
     print("=" * 50)
     
@@ -667,9 +858,23 @@ def main():
     print("✅ Conectado!")
     
     
-    # Ejecutar backtesting por activo
-    for par in assets:
-        resultados = ejecutar_backtesting(Iq, par, fecha_inicio, fecha_fin, guardar_en_bd)
+    # Ejecutar backtesting por activo y por día (hasta ayer)
+    fecha_actual = fecha_inicio_base
+    while fecha_actual <= fecha_hasta:
+        fecha_inicio = datetime.combine(fecha_actual, datetime.min.time()).replace(hour=5, minute=0, second=0, microsecond=0)
+        fecha_fin = datetime.combine(fecha_actual, datetime.min.time()).replace(hour=18, minute=0, second=0, microsecond=0)
+
+        print("\n" + "-" * 60)
+        print(f"📅 Procesando día: {fecha_actual} (05:00-18:00)")
+
+        for par in assets:
+            resultados = ejecutar_backtesting(Iq, par, fecha_inicio, fecha_fin, guardar_en_bd)
+
+        if fecha_actual < fecha_hasta:
+            print("⏳ Esperando 60 segundos para iniciar el próximo día...")
+            time.sleep(90)
+
+        fecha_actual += timedelta(days=1)
 
     input("Presiona Enter para terminar...")            
 

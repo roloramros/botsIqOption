@@ -1,0 +1,86 @@
+[
+  {
+    "asset": "ETH",
+    "amount": 0.00695,
+    "usdt_spent": 17.0,
+    "price_usd": 2446.043165467626,
+    "timestamp": "2026-02-27T04:11:52Z"
+  },
+  {
+    "asset": "ETH",
+    "amount": 0.00708715,
+    "usdt_spent": 20.0,
+    "price_usd": 2822.008846997735,
+    "timestamp": "2026-02-27T04:12:43Z"
+  },
+  {
+    "asset": "ETH",
+    "amount": 0.014888,
+    "usdt_spent": 50.0,
+    "price_usd": 3358.409457281032,
+    "timestamp": "2026-02-27T04:13:57Z"
+  },
+  {
+    "asset": "LTC",
+    "amount": 0.660103,
+    "usdt_spent": 50.0,
+    "price_usd": 75.7457548291706,
+    "timestamp": "2026-02-27T04:19:35Z"
+  },
+  {
+    "asset": "LTC",
+    "amount": 0.5455376,
+    "usdt_spent": 33.0,
+    "price_usd": 60.49078926915396,
+    "timestamp": "2026-02-27T04:20:07Z"
+  },
+  {
+    "asset": "SOL",
+    "amount": 0.22681,
+    "usdt_spent": 20.0,
+    "price_usd": 88.17953353026762,
+    "timestamp": "2026-02-27T04:20:41Z"
+  },
+  {
+    "asset": "BTC",
+    "amount": 0.000757,
+    "usdt_spent": 74.0,
+    "price_usd": 97754.29326287979,
+    "timestamp": "2026-02-27T04:21:50Z"
+  },
+  {
+    "asset": "BTC",
+    "amount": 0.00028963,
+    "usdt_spent": 27.0,
+    "price_usd": 93222.38718364811,
+    "timestamp": "2026-02-27T04:22:11Z"
+  },
+  {
+    "asset": "BTC",
+    "amount": 0.000258,
+    "usdt_spent": 25.0,
+    "price_usd": 96899.22480620156,
+    "timestamp": "2026-02-27T04:22:25Z"
+  },
+  {
+    "asset": "BTC",
+    "amount": 0.000593,
+    "usdt_spent": 50.0,
+    "price_usd": 84317.03204047217,
+    "timestamp": "2026-02-27T04:22:46Z"
+  },
+  {
+    "asset": "BTC",
+    "amount": 0.00028103,
+    "usdt_spent": 20.0,
+    "price_usd": 71166.77934740063,
+    "timestamp": "2026-02-27T04:22:59Z"
+  },
+  {
+    "asset": "BNB",
+    "amount": 0.03191184,
+    "usdt_spent": 20.0,
+    "price_usd": 626.7266318708041,
+    "timestamp": "2026-02-27T04:23:21Z"
+  }
+]
