@@ -49,6 +49,8 @@ NUM_PERDIDAS_CONSECUTIVAS = 0    # luego puedes poner 1, 2 o 3
 
 # Monto por operación: se setea desde argv
 TRADE_AMOUNT = 1.0
+STOP_WIN = 1.0
+STOP_LOSS = 1.0
 
 # =========================
 # TIPOS
@@ -80,10 +82,17 @@ def parse_amount_arg(s: str) -> float:
 
 def usage_and_exit():
     print("Uso:")
-    print("  python3 -u Bot_1.py <email> <password> <monto>")
+    print("  python3 -u Bot_2.py <email> <password> <monto> <stop_win> <stop_loss>")
     print('Ejemplo:')
-    print('  python3 -u Bot_1.py "correo@x.com" "miPass" 1,5')
+    print('  python3 -u Bot_2.py "correo@x.com" "miPass" 1,5 3 2')
     sys.exit(2)
+
+def parse_stop_arg(s: str, nombre: str) -> float:
+    valor = parse_amount_arg(s)
+    if valor <= 0:
+        raise ValueError(f"{nombre} debe ser > 0")
+    return valor
+
 
 # =========================
 # LÓGICA DE COLORES
@@ -341,7 +350,7 @@ def analizar_par(
 def monitorizar_patron(
     iq: IQ_Option,
     candidato: Dict[str, Any]
-) -> None:
+) -> Optional[float]:
     par = candidato["par"]
     patron_objetivo = candidato["patron"]
     color_dominante = candidato["color_dominante"]
@@ -380,7 +389,7 @@ def monitorizar_patron(
         patron_actual = "".join(colores)
 
         if patron_actual == patron_objetivo:
-            print(f"[MONITOR] ¡Patrón encontrado! Ejecutando operación REAL...")
+            print(f"[MONITOR] ¡Patrón encontrado! Ejecutando operación...")
 
             if color_dominante == "V":
                 direction = "call"
@@ -388,8 +397,7 @@ def monitorizar_patron(
                 direction = "put"
             else:
                 print("[MONITOR] Color dominante G (doji) — no operamos.")
-                print("[MONITOR] Finalizando script.")
-                sys.exit(0)
+                return None
 
             monto = float(TRADE_AMOUNT)
             exp = 1  # expiración = 1 minuto
@@ -398,14 +406,42 @@ def monitorizar_patron(
                 status, order_id = iq.buy(monto, par, direction, exp)
                 if status is False:
                     print("[MONITOR] ERROR al enviar operación.")
+                    return None
                 else:
                     print(f"[MONITOR] OPERACIÓN ENVIADA → {par} | {direction.upper()} | ${monto} | exp: 1m")
+                    resultado = esperar_resultado_operacion(iq, order_id)
+                    if resultado is None:
+                        print("[MONITOR] No se pudo obtener el resultado de la operación.")
+                        return None
+
+                    print(f"[MONITOR] Resultado operación (PnL): {resultado:.2f} USD")
+                    return resultado
 
             except Exception as e:
                 print(f"[MONITOR] EXCEPCIÓN EN OPERACIÓN: {e}")
 
-            print("[MONITOR] OPERACIÓN LISTA. Terminando script automáticamente.")
-            sys.exit(0)
+            
+def esperar_resultado_operacion(iq: IQ_Option, order_id: Any, timeout_segundos: int = 180) -> Optional[float]:
+    inicio = time.time()
+    while (time.time() - inicio) <= timeout_segundos:
+        try:
+            res = iq.check_win_v4(order_id)
+        except Exception:
+            time.sleep(2)
+            continue
+
+        if res is None:
+            time.sleep(2)
+            continue
+
+        try:
+            if isinstance(res, (list, tuple)) and len(res) >= 2:
+                return float(res[1])
+            return float(res)
+        except (TypeError, ValueError):
+            time.sleep(2)
+
+    return None            
 
 # =========================
 # BUCLE PRINCIPAL
@@ -413,6 +449,7 @@ def monitorizar_patron(
 
 def bucle_analisis(iq: IQ_Option) -> None:
     hora_inicial: Optional[datetime] = None
+    profit_sesion = 0.0
 
     def _get_candles_wrapper(par: str, desde: datetime, hasta: datetime, tf: int) -> List[Candle]:
         return get_candles_iqoption(iq, par, desde, hasta, tf)
@@ -456,7 +493,18 @@ def bucle_analisis(iq: IQ_Option) -> None:
             time.sleep(espera)
             continue
 
-        monitorizar_patron(iq, mejor_candidato_global)
+        pnl = monitorizar_patron(iq, mejor_candidato_global)
+        if pnl is not None:
+            profit_sesion += pnl
+            print(f"[SESIÓN] Profit acumulado: {profit_sesion:.2f} USD")
+
+            if profit_sesion >= STOP_WIN:
+                print(f"[SESIÓN] STOP WIN alcanzado ({STOP_WIN:.2f} USD). Finalizando.")
+                return
+
+            if profit_sesion <= -STOP_LOSS:
+                print(f"[SESIÓN] STOP LOSS alcanzado (-{STOP_LOSS:.2f} USD). Finalizando.")
+                return
 
         espera = segundos_hasta_siguiente_cierre(TIMEFRAME_SEGUNDOS)
         print(f"[POST-OPERACIÓN] Reanudando fase de escaneo en {espera} s...")
@@ -467,16 +515,18 @@ def bucle_analisis(iq: IQ_Option) -> None:
 # =========================
 
 if __name__ == "__main__":
-    # argv: Bot_1.py email password amount
-    if len(sys.argv) < 4:
+    # argv: Bot_2.py email password amount stop_win stop_loss
+    if len(sys.argv) < 6:
         usage_and_exit()
 
     email = sys.argv[1]
     password = sys.argv[2]
     try:
         TRADE_AMOUNT = parse_amount_arg(sys.argv[3])
+        STOP_WIN = parse_stop_arg(sys.argv[4], "STOP_WIN")
+        STOP_LOSS = parse_stop_arg(sys.argv[5], "STOP_LOSS")
     except Exception as e:
-        print(f"Error en monto: {e}")
+        print(f"Error en parámetros: {e}")
         usage_and_exit()
 
     iq = conectar_iqoption(email, password)

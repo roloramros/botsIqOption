@@ -43,11 +43,12 @@ ALLOWED_CHATS = {int(x.strip()) for x in ALLOWED_CHATS_RAW.split(",") if x.strip
 # Ruta del script a lanzar en VPS
 BASE_DIR = Path(__file__).parent.resolve()
 BOT1_PATH = str(BASE_DIR / "Bot_1.py")
+BOT2_PATH = str(BASE_DIR / "Bot_2.py")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Falta TELEGRAM_TOKEN en el .env")
 
-IQ_EMAIL, IQ_PASSWORD, PICK_INPUT_MODE, WORK_MODE, AMOUNT, CONFIRM = range(6)
+IQ_EMAIL, IQ_PASSWORD, PICK_INPUT_MODE, WORK_MODE, AMOUNT, STOP_WIN, STOP_LOSS, CONFIRM = range(8)
 
 
 def _is_allowed(update: Update) -> bool:
@@ -148,17 +149,22 @@ def _build_summary_md(user_data: dict) -> str:
     pick_mode = user_data.get("pick_input_mode") or "-"
     work_mode = user_data.get("work_mode") or "-"
     amount = user_data.get("amount")
+    stop_win = user_data.get("stop_win")
+    stop_loss = user_data.get("stop_loss")
     amount_txt = (f"{amount}".replace(".", ",") if amount is not None else "-")
+    stop_win_txt = (f"{stop_win}".replace(".", ",") if stop_win is not None else "-")
+    stop_loss_txt = (f"{stop_loss}".replace(".", ",") if stop_loss is not None else "-")
 
     return (
         "✅ **Resumen de configuración**\n\n"
         f"- **Email:** `{email}`\n"
         f"- **Activo/Patrón:** **{pick_mode}**\n"
         f"- **Modo de trabajo:** **{work_mode}**\n"
-        f"- **Monto por operación:** **{amount_txt}**\n\n"
+        f"- **Monto por operación:** **{amount_txt}**\n"
+        f"- **Stop Win:** **{stop_win_txt}**\n"
+        f"- **Stop Loss:** **{stop_loss_txt}**\n\n"
         "¿Qué hacemos?"
     )
-
 
 def _launch_bot1(email: str, password: str, amount: float):
     """
@@ -181,6 +187,32 @@ def _launch_bot1(email: str, password: str, amount: float):
     return pid, log_file
 
 
+def _launch_bot2(email: str, password: str, amount: float, stop_win: float, stop_loss: float):
+    """
+    Lanza Bot_2.py en background usando nohup y python3 -u
+    Logs en la misma carpeta.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = str(BASE_DIR / f"Bot_2_{ts}.log")
+
+    q_email = shlex.quote(email)
+    q_pass = shlex.quote(password)
+    q_amount = shlex.quote(_amount_to_str(amount))
+    q_stop_win = shlex.quote(_amount_to_str(stop_win))
+    q_stop_loss = shlex.quote(_amount_to_str(stop_loss))
+    q_script = shlex.quote(BOT2_PATH)
+    q_log = shlex.quote(log_file)
+
+    cmd = (
+        f"nohup python3 -u {q_script} {q_email} {q_pass} {q_amount} "
+        f"{q_stop_win} {q_stop_loss} > {q_log} 2>&1 & echo $!"
+    )
+    out = subprocess.check_output(["bash", "-lc", cmd], text=True).strip()
+    pid = int(out)
+
+    return pid, log_file
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
         await update.message.reply_text("No autorizado.")
@@ -192,6 +224,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pick_input_mode"] = None
     context.user_data["work_mode"] = None
     context.user_data["amount"] = None
+    context.user_data["stop_win"] = None
+    context.user_data["stop_loss"] = None
     context.user_data["_last_bot_msg_id"] = None
 
     await _safe_delete_user_message(update)
@@ -305,6 +339,56 @@ async def capture_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["amount"] = val
 
+    pick_mode = context.user_data.get("pick_input_mode")
+    work_mode = context.user_data.get("work_mode")
+    if pick_mode == "Automático" and work_mode == "Usar Stops":
+        await _send_prompt(update, context, "Ingresá el **stop win** (ej: `3` o `3,5`):")
+        return STOP_WIN
+
+    await _send_prompt(
+        update,
+        context,
+        _build_summary_md(context.user_data),
+        reply_markup=_confirm_keyboard(),
+    )
+    return CONFIRM
+
+
+async def capture_stop_win(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update):
+        return ConversationHandler.END
+
+    await _delete_last_bot_prompt(update, context)
+
+    raw = (update.message.text or "").strip()
+    await _safe_delete_user_message(update)
+
+    val = _parse_amount(raw)
+    if val is None:
+        await _send_prompt(update, context, "Stop win inválido. Poné un número > 0 (ej: `3`, `3,5`, `3.5`):")
+        return STOP_WIN
+
+    context.user_data["stop_win"] = val
+    await _send_prompt(update, context, "Ingresá el **stop loss** (ej: `2` o `2,5`):")
+    return STOP_LOSS
+
+
+async def capture_stop_loss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update):
+        return ConversationHandler.END
+
+    await _delete_last_bot_prompt(update, context)
+
+    raw = (update.message.text or "").strip()
+    await _safe_delete_user_message(update)
+
+    val = _parse_amount(raw)
+    if val is None:
+        await _send_prompt(update, context, "Stop loss inválido. Poné un número > 0 (ej: `2`, `2,5`, `2.5`):")
+        return STOP_LOSS
+
+    context.user_data["stop_loss"] = val
+
     await _send_prompt(
         update,
         context,
@@ -335,37 +419,57 @@ async def confirm_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pick_mode = context.user_data.get("pick_input_mode")
     work_mode = context.user_data.get("work_mode")
+    email = context.user_data.get("iq_email") or ""
+    password = context.user_data.get("iq_password") or ""
+    amount = context.user_data.get("amount")
 
-    # Solo lanzamos Bot_1.py en esta combinación:
     if pick_mode == "Automático" and work_mode == "Operacion Unica":
-        email = context.user_data.get("iq_email") or ""
-        password = context.user_data.get("iq_password") or ""
-        amount = context.user_data.get("amount")
-
         if not email or not password or amount is None:
             await query.message.chat.send_message("Faltan datos para lanzar (email/pass/monto).")
             return ConversationHandler.END
 
         try:
             pid, log_file = _launch_bot1(email=email, password=password, amount=float(amount))
-            # No mostramos contraseña. Solo PID y log.
             await query.message.chat.send_message(
                 f"✅ Bot_1 lanzado.\nPID: {pid}\nLog: {log_file}"
             )
         except Exception as e:
             await query.message.chat.send_message(f"❌ Error lanzando Bot_1: {e}")
         finally:
-            # Limpia RAM
             context.user_data.clear()
 
         return ConversationHandler.END
 
-    # Cualquier otra combinación: placeholder para seguir añadiendo preguntas
+    if pick_mode == "Automático" and work_mode == "Usar Stops":
+        stop_win = context.user_data.get("stop_win")
+        stop_loss = context.user_data.get("stop_loss")
+
+        if not email or not password or amount is None or stop_win is None or stop_loss is None:
+            await query.message.chat.send_message("Faltan datos para lanzar (email/pass/monto/stop_win/stop_loss).")
+            return ConversationHandler.END
+
+        try:
+            pid, log_file = _launch_bot2(
+                email=email,
+                password=password,
+                amount=float(amount),
+                stop_win=float(stop_win),
+                stop_loss=float(stop_loss),
+            )
+            await query.message.chat.send_message(
+                f"✅ Bot_2 lanzado.\nPID: {pid}\nLog: {log_file}"
+            )
+        except Exception as e:
+            await query.message.chat.send_message(f"❌ Error lanzando Bot_2: {e}")
+        finally:
+            context.user_data.clear()
+
+        return ConversationHandler.END
+
     await query.message.chat.send_message(
-        "Esta combinación requiere más preguntas. (Seguimos aquí en el siguiente paso)."
+        "Esta combinación todavía no está implementada."
     )
     return ConversationHandler.END
-
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -385,6 +489,8 @@ def main():
             PICK_INPUT_MODE: [CallbackQueryHandler(choose_pick_input_mode, pattern=r"^pick:(manual|auto)$")],
             WORK_MODE: [CallbackQueryHandler(choose_work_mode, pattern=r"^mode:(single|stops)$")],
             AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, capture_amount)],
+            STOP_WIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, capture_stop_win)],
+            STOP_LOSS: [MessageHandler(filters.TEXT & ~filters.COMMAND, capture_stop_loss)],
             CONFIRM: [CallbackQueryHandler(confirm_action, pattern=r"^confirm:(launch|cancel)$")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
